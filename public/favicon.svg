@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <rect width="64" height="64" rx="14" fill="#0b0f1a"/>
+  <!-- descending stair rune: three chevrons going down -->
+  <g fill="none" stroke="#56b4e9" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="18,20 32,30 46,20"/>
+    <polyline points="18,32 32,42 46,32" stroke="#009e73"/>
+    <polyline points="18,44 32,54 46,44" stroke="#e69f00"/>
+  </g>
+</svg>
