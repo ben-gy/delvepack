@@ -32,7 +32,7 @@
  */
 
 import { Game } from './game';
-import type { Net, PeerId } from './engine/net';
+import type { Net, PeerId } from '@ben-gy/game-engine/net';
 
 /** Host -> all: the whole world. */
 type WorldMsg = ReturnType<Game['snapshot']>;

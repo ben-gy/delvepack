@@ -26,7 +26,7 @@
  * agree on.
  */
 
-import { makeRng, type Rng, randFloat, randInt } from './engine/rng';
+import { makeRng, type Rng, randFloat, randInt } from '@ben-gy/game-engine/rng';
 import { tuning } from './tuning';
 import type { Mode } from './modes';
 import { UPGRADES, type Stats } from './upgrades';
