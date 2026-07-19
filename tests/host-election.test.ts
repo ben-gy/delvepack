@@ -22,7 +22,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Net } from '../src/engine/net';
+import type { Net } from '@ben-gy/game-engine/net';
 
 interface Wire {
   peers: Map<string, Room>;
@@ -109,7 +109,7 @@ async function peer(id: string, opts: { claimHost?: boolean } = {}): Promise<Net
       return room;
     },
   }));
-  const mod = await import('../src/engine/net');
+  const mod = await import('@ben-gy/game-engine/net');
   return mod.createNet({ appId: 'delvepack', roomId: 'R', claimHost: opts.claimHost });
 }
 
@@ -186,7 +186,13 @@ describe('host election — nobody hosts a mesh that has not formed', () => {
     connect('a', 'b');
     // Neither claimed (both arrived via a link into an empty room). They must
     // not deadlock waiting for an incumbent that does not exist.
-    vi.advanceTimersByTime(2600);
+    //
+    // The settle window is 6s in engine v1.1.0, up from 2.5s. That is the whole
+    // point: Nostr discovery plus ICE on a mobile network routinely takes longer
+    // than 2.5s, and a joiner that gave up early self-elected and then stole a
+    // live room. Waiting past the real window is what makes this a fallback
+    // rather than a race.
+    vi.advanceTimersByTime(6100);
     expect(a.isHost()).toBe(true); // min-id, agreed by both
     expect(b.isHost()).toBe(false);
     expect(b.host()).toBe('a');

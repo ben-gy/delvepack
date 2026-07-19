@@ -11,7 +11,7 @@
 
 import { Game } from '../../src/game';
 import { heroIntent } from '../../src/ai';
-import { makeRng } from '../../src/engine/rng';
+import { makeRng } from '@ben-gy/game-engine/rng';
 import type { Mode } from '../../src/modes';
 
 export interface RunResult {

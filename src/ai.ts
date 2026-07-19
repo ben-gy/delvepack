@@ -12,7 +12,7 @@
 
 import type { Game, Hero } from './game';
 import { HERO_R } from './game';
-import type { Rng } from './engine/rng';
+import type { Rng } from '@ben-gy/game-engine/rng';
 
 export interface Intent {
   ax: number;

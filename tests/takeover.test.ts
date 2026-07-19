@@ -23,17 +23,24 @@ import { describe, expect, it, vi } from 'vitest';
 import { createSession, type SessionSeat } from '../src/net-game';
 import { Game, type HeroSpec } from '../src/game';
 import { MODES } from '../src/modes';
-import type { Net, PeerId } from '../src/engine/net';
+import type { Net, PeerId } from '@ben-gy/game-engine/net';
 
 /** A Net connected to nothing — the situation one ms after the host tab closes. */
 function silentNet(selfId: PeerId, host: PeerId | null, sent?: Record<string, unknown[]>): Net {
+  // A room of one that never changes: no peer ever arrives or leaves, the term
+  // never advances, and there is no signaling socket to report. Spelling that
+  // out rather than stubbing it away keeps the double honest about the one
+  // situation it models — a survivor alone the instant the host vanished.
+  let epoch = host === null ? 0 : 1;
   return {
     selfId,
     peers: () => [selfId],
     host: () => host,
     isHost: () => host === selfId,
     hostSettled: () => host !== null,
+    hostEpoch: () => epoch,
     count: () => 1,
+    onPeersChange: () => () => {},
     channel: <T>(name: string) => {
       const send = ((d: T) => {
         if (sent) (sent[name] ??= []).push(d);
@@ -42,6 +49,19 @@ function silentNet(selfId: PeerId, host: PeerId | null, sent?: Record<string, un
       return send;
     },
     ping: async () => 0,
+    takeover: () => {
+      host = selfId;
+      epoch++;
+    },
+    netDiag: () => ({
+      selfId,
+      host,
+      epoch,
+      settled: host !== null,
+      peers: [selfId],
+      relaySockets: {},
+      turn: false,
+    }),
     leave: async () => {},
   };
 }

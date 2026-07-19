@@ -2,7 +2,8 @@
  * net-lifecycle.test.ts — the tripwire.
  *
  * One invariant, asserted directly: a multiplayer session joins its room ONCE.
- * Every round after the first happens inside that room (see engine/rematch.ts).
+ * Every round after the first happens inside that room (see the engine's
+ * rematch.ts, now consumed as @ben-gy/game-engine/rematch).
  *
  * This is the test that would have caught the shipped bug. It needs no relay, no
  * timing model and no browser — it just refuses to let the leave/rejoin pattern
@@ -60,7 +61,7 @@ vi.mock('trystero', () => ({
   },
 }));
 
-const { createNet, netStats, resetNetStats } = await import('../src/engine/net');
+const { createNet, netStats, resetNetStats } = await import('@ben-gy/game-engine/net');
 
 const APP = 'delvepack-lifecycle';
 
@@ -179,18 +180,28 @@ describe('createNet — channel fan-out', () => {
     await net.leave();
   });
 
-  it('keeps the rematch protocol on exactly three reserved names', () => {
+  it('keeps the rematch protocol on exactly four reserved names', () => {
     // net.channel() fans out, so a game channel colliding with rematch.ts's
-    // 'rv'/'rs'/'rq' would feed every message to both subsystems.
+    // reserved names would feed every message to both subsystems.
     //
-    // ADAPTED from windup, which types its own channel list as `Chan` imported
-    // from src/match.ts so tsc breaks on a rename. Morsel's match layer does not
-    // exist yet, so instead of inventing names we read the reserved set straight
-    // out of rematch.ts — if the engine ever grows a fourth channel, this goes
-    // red and whoever wires up match.ts has to pick a name around it.
-    const src = readFileSync('src/engine/rematch.ts', 'utf8');
+    // We read the reserved set straight out of the engine's rematch.ts rather
+    // than restating it, so a channel added upstream turns this red instead of
+    // silently colliding. Engine v1.1.0 added 'rk' — the start ACK that lets the
+    // host re-broadcast to a peer whose data channel opened late, which is the
+    // fix for players being "ejected" the moment a round began.
+    const src = readFileSync(
+      'node_modules/@ben-gy/game-engine/src/rematch.ts',
+      'utf8',
+    );
     const reserved = [...src.matchAll(/net\.channel<[^>]*>\(\s*'([^']+)'/g)].map((m) => m[1]);
-    expect(reserved.sort()).toEqual(['rq', 'rs', 'rv']);
+    expect(reserved.sort()).toEqual(['rk', 'rq', 'rs', 'rv']);
     for (const c of reserved) expect(c.length).toBeLessThanOrEqual(12);
+    // And the game must not itself claim any of them.
+    const game = readFileSync('src/net-game.ts', 'utf8');
+    for (const c of reserved) {
+      expect(game, `net-game.ts collides with reserved channel '${c}'`).not.toMatch(
+        new RegExp(`channel<[^>]*>\\(\\s*'${c}'`),
+      );
+    }
   });
 });

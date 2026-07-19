@@ -15,22 +15,51 @@
  *    makes the trap unreachable — no network model required.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createRounds, type RoundInfo } from '../src/engine/rematch';
-import type { Net, PeerId } from '../src/engine/net';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createRounds, type RoundInfo } from '@ben-gy/game-engine/rematch';
+import type { Net, PeerId } from '@ben-gy/game-engine/net';
 import { MODES } from '../src/modes';
 
-/** A shared in-memory bus. Delivery is synchronous — we are testing protocol
- *  decisions, not timing. */
+/** A shared in-memory bus. Message delivery is synchronous — we are testing
+ *  protocol decisions, not transport timing. Roster changes are real events
+ *  though: rematch.ts now defers an auto-start until the roster has held still
+ *  (ROSTER_SETTLE_MS), so a bus that changed its membership silently would let
+ *  every test freeze a roster mid-formation — the exact bug being fixed. */
 class Bus {
   peers = new Map<PeerId, Map<string, Set<(d: unknown, from: PeerId) => void>>>();
+  /** peer id -> its roster-change subscribers (net.onPeersChange fans out). */
+  watchers = new Map<PeerId, Set<(peers: PeerId[]) => void>>();
+  /** A deliberate takeover, if one happened: id plus the term it minted. */
+  claimed: { id: PeerId; epoch: number } | null = null;
 
   join(id: PeerId): void {
     this.peers.set(id, new Map());
+    this.watchers.set(id, new Set());
+    this.announceRoster();
   }
 
   part(id: PeerId): void {
     this.peers.delete(id);
+    this.watchers.delete(id);
+    if (this.claimed?.id === id) this.claimed = null;
+    this.announceRoster();
+  }
+
+  /** Tell everyone still in the room who is in it now. */
+  announceRoster(): void {
+    const roster = this.roster();
+    for (const subs of this.watchers.values()) for (const cb of [...subs]) cb(roster);
+  }
+
+  watch(id: PeerId, cb: (peers: PeerId[]) => void): () => void {
+    const subs = this.watchers.get(id)!;
+    subs.add(cb);
+    return () => subs.delete(cb);
+  }
+
+  /** Whoever holds the room: an explicit claim outranks the min-id default. */
+  hostId(): PeerId | null {
+    return this.claimed?.id ?? this.roster()[0] ?? null;
   }
 
   roster(): PeerId[] {
@@ -57,13 +86,19 @@ function mockNet(bus: Bus, selfId: PeerId): Net {
   return {
     selfId,
     peers: () => bus.roster(),
-    // Same election rule as the real net.ts: lexicographically smallest id.
-    host: () => bus.roster()[0] ?? null,
-    isHost: () => bus.roster()[0] === selfId,
+    // Same election rule as the real net.ts: an explicit claim if there is one,
+    // otherwise the lexicographically smallest id.
+    host: () => bus.hostId(),
+    isHost: () => bus.hostId() === selfId,
     // These peers are all wired to each other from the first tick; net.ts's
     // settling window is its own business and host-election.test.ts owns it.
     hostSettled: () => true,
+    // One term, held by whoever holds the room, advanced only by a takeover.
+    hostEpoch: () => bus.claimed?.epoch ?? 1,
     count: () => bus.roster().length,
+    onPeersChange(cb) {
+      return bus.watch(selfId, cb);
+    },
     channel<T>(name: string, onReceive: (d: T, from: PeerId) => void) {
       const off = bus.on(selfId, name, onReceive as (d: unknown, from: PeerId) => void);
       const send = ((data: T, to?: PeerId | PeerId[]) => bus.send(selfId, name, data, to)) as ((
@@ -74,6 +109,18 @@ function mockNet(bus: Bus, selfId: PeerId): Net {
       return send;
     },
     ping: async () => 0,
+    takeover() {
+      bus.claimed = { id: selfId, epoch: (bus.claimed?.epoch ?? 1) + 1 };
+    },
+    netDiag: () => ({
+      selfId,
+      host: bus.hostId(),
+      epoch: bus.claimed?.epoch ?? 1,
+      settled: true,
+      peers: bus.roster(),
+      relaySockets: {},
+      turn: false,
+    }),
     leave: async () => bus.part(selfId),
   };
 }
@@ -89,12 +136,27 @@ interface Seat {
   got: RoundInfo[];
 }
 
+/**
+ * Let the roster go quiet.
+ *
+ * rematch.ts refuses to freeze a roster that changed within the last
+ * ROSTER_SETTLE_MS (4s) and re-attempts on its 1.5s resync poll, so 6s covers
+ * the window plus the next tick. Every join AND every leave re-arms it. That
+ * deferral is the fix for players being "ejected" the instant a round began —
+ * the host used to freeze a roster from a half-formed mesh, and whoever was one
+ * handshake behind was simply not in the game. So calling this is not a test
+ * workaround: a room that starts without it is a room mid-formation.
+ */
+const settle = (): void => {
+  vi.advanceTimersByTime(6000);
+};
+
 function table(
   ids: PeerId[],
   opts: { minPlayers?: number; modes?: Record<string, string> } = {},
 ): Seat[] {
   const bus = new Bus();
-  return ids.map((id) => {
+  const seated = ids.map((id) => {
     const net = mockNet(bus, id);
     const seat: Seat = { id, net, rounds: null as never, got: [] };
     seat.rounds = createRounds({
@@ -108,11 +170,22 @@ function table(
     });
     return seat;
   });
+  // The mesh has formed and held still. Everything after this is a lobby whose
+  // roster is trustworthy, which is what the rest of these cases are about.
+  settle();
+  return seated;
 }
 
 let seats: Seat[];
 beforeEach(() => {
   seats = [];
+  // The roster settle window and the grace countdown are both real timers now,
+  // so every case in this file drives the clock rather than assuming zero.
+  vi.useFakeTimers();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe('createRounds — starting a round', () => {
@@ -209,6 +282,7 @@ describe("createRounds — the host's mode travels frozen", () => {
     seats = table(['a', 'b'], { modes: { a: 'warren', b: 'crypt' } });
     seats.forEach((s) => s.rounds.vote());
     seats.forEach((s) => s.rounds.finish());
+    settle(); // finish() re-arms the settle window so a rematch never inherits a stale one
     seats.forEach((s) => s.rounds.vote());
 
     for (const s of seats) expect(modeOf(s.got[1])).toBe('warren');
@@ -227,6 +301,7 @@ describe("createRounds — the host's mode travels frozen", () => {
       onRound: (i) => got.push(i),
     });
     const other = createRounds({ net: guest, playerName: 'B', onRound: () => {} });
+    settle();
 
     host.vote();
     other.vote();
@@ -234,6 +309,7 @@ describe("createRounds — the host's mode travels frozen", () => {
 
     host.finish();
     other.finish();
+    settle();
     hostMode = 'crypt'; // the host changed its mind at the results screen
     host.vote();
     other.vote();
@@ -262,6 +338,7 @@ describe('createRounds — the rematch (the bug this all exists for)', () => {
     seats = table(['a', 'b']);
     seats.forEach((s) => s.rounds.vote());
     seats.forEach((s) => s.rounds.finish());
+    settle(); // finish() re-arms the settle window so a rematch never inherits a stale one
 
     // Both players hit "Play again" — the exact sequence the user reported.
     seats.forEach((s) => s.rounds.vote());
@@ -302,6 +379,7 @@ describe('createRounds — the rematch (the bug this all exists for)', () => {
 
     const a = mk('a');
     let b = mk('b');
+    settle();
     a.rounds.vote();
     b.rounds.vote();
     expect(a.got[0].round).toBe(1); // round 1 played by both
@@ -314,6 +392,7 @@ describe('createRounds — the rematch (the bug this all exists for)', () => {
 
     // A brand-new 'b' rejoins from scratch — round 0.
     b = mk('b');
+    settle(); // …and the room is whole again before anyone starts anything
 
     // Both hit Play again. Without the catch-up this hangs: 'b' votes for round 1,
     // 'a' expects round 2, the votes never meet.
@@ -332,6 +411,7 @@ describe('createRounds — the rematch (the bug this all exists for)', () => {
     seats = table(['a', 'b']);
     seats.forEach((s) => s.rounds.vote());
     seats.forEach((s) => s.rounds.finish());
+    settle(); // finish() re-arms the settle window so a rematch never inherits a stale one
     seats.forEach((s) => s.rounds.vote());
 
     // "Neither can see each other" — assert the opposite, directly.
@@ -368,12 +448,14 @@ describe('createRounds — the rematch (the bug this all exists for)', () => {
     seats = table(['a', 'b', 'c'], { minPlayers: 2 });
     seats.forEach((s) => s.rounds.vote());
     seats.forEach((s) => s.rounds.finish());
+    settle(); // finish() re-arms the settle window so a rematch never inherits a stale one
 
     seats[0].rounds.vote();
     seats[1].rounds.vote();
     expect(seats[0].got.length).toBe(1); // still waiting on c
 
     seats[2].net.leave(); // c closes the tab
+    settle(); // a departure re-arms the settle window too
     seats[0].rounds.vote(); // any nudge re-tallies
 
     // A departed peer must be dropped, not held for — and must not land in the
@@ -387,10 +469,12 @@ describe('createRounds — host handover', () => {
     seats = table(['a', 'b', 'c'], { minPlayers: 2 });
     seats.forEach((s) => s.rounds.vote());
     seats.forEach((s) => s.rounds.finish());
+    settle(); // finish() re-arms the settle window so a rematch never inherits a stale one
     expect(seats[0].net.isHost()).toBe(true);
 
     seats[0].net.leave(); // the host walks away between rounds
     expect(seats[1].net.isHost()).toBe(true); // b is promoted by min-id election
+    settle(); // the promoted host waits for the roster to hold still, like any host
 
     seats[1].rounds.vote();
     seats[2].rounds.vote();
@@ -407,10 +491,10 @@ describe('createRounds — host handover', () => {
 
 describe('createRounds — never deadlock waiting for a vote that never comes', () => {
   it('starts anyway once the grace countdown expires, without the silent player', () => {
-    vi.useFakeTimers();
     seats = table(['a', 'b', 'c'], { minPlayers: 2 });
     seats.forEach((s) => s.rounds.vote());
     seats.forEach((s) => s.rounds.finish());
+    settle(); // finish() re-arms the settle window so a rematch never inherits a stale one
 
     // Two of three hit "Play again". The third is still reading the scores —
     // which is the whole point of them, and takes a while. The OLD rule demanded
@@ -427,26 +511,25 @@ describe('createRounds — never deadlock waiting for a vote that never comes', 
 
     expect(seats[0].got.length).toBe(2);
     expect(seats[0].got[1].players.map((p) => p.id)).toEqual(['a', 'b']);
-    vi.useRealTimers();
   });
 
   it('goes immediately when everyone votes, with no countdown', () => {
-    vi.useFakeTimers();
     seats = table(['a', 'b'], { minPlayers: 2 });
     seats.forEach((s) => s.rounds.vote());
     seats.forEach((s) => s.rounds.finish());
+    settle(); // finish() re-arms the settle window so a rematch never inherits a stale one
     seats.forEach((s) => s.rounds.vote());
 
     // Unanimity must not be punished with an 8s wait.
     expect(seats[0].got.length).toBe(2);
     expect(seats[0].rounds.state().startsInMs).toBeNull();
-    vi.useRealTimers();
   });
 
   it('lets the host force the rematch immediately with go()', () => {
     seats = table(['a', 'b', 'c'], { minPlayers: 2 });
     seats.forEach((s) => s.rounds.vote());
     seats.forEach((s) => s.rounds.finish());
+    settle(); // finish() re-arms the settle window so a rematch never inherits a stale one
 
     seats[0].rounds.vote();
     seats[1].rounds.vote();
@@ -456,10 +539,10 @@ describe('createRounds — never deadlock waiting for a vote that never comes', 
   });
 
   it('cancels the countdown if quorum is lost again', () => {
-    vi.useFakeTimers();
     seats = table(['a', 'b', 'c'], { minPlayers: 2 });
     seats.forEach((s) => s.rounds.vote());
     seats.forEach((s) => s.rounds.finish());
+    settle(); // finish() re-arms the settle window so a rematch never inherits a stale one
 
     seats[0].rounds.vote();
     seats[1].rounds.vote();
@@ -470,14 +553,13 @@ describe('createRounds — never deadlock waiting for a vote that never comes', 
 
     vi.advanceTimersByTime(8100);
     expect(seats[0].got.length).toBe(1); // nothing started below quorum
-    vi.useRealTimers();
   });
 
   it('a peer who readies up mid-countdown still lands in the roster', () => {
-    vi.useFakeTimers();
     seats = table(['a', 'b', 'c'], { minPlayers: 2 });
     seats.forEach((s) => s.rounds.vote());
     seats.forEach((s) => s.rounds.finish());
+    settle(); // finish() re-arms the settle window so a rematch never inherits a stale one
 
     seats[0].rounds.vote();
     seats[1].rounds.vote();
@@ -485,7 +567,6 @@ describe('createRounds — never deadlock waiting for a vote that never comes', 
 
     expect(seats[2].got.length).toBe(2);
     expect(seats[2].got[1].players.map((p) => p.id)).toEqual(['a', 'b', 'c']);
-    vi.useRealTimers();
   });
 });
 

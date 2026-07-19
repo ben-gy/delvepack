@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { mintCode, normalizeRoomCode } from '../src/engine/lobby';
+import { mintCode, normalizeRoomCode } from '@ben-gy/game-engine/lobby';
 
 describe('normalizeRoomCode', () => {
   it('canonicalises what a human actually types', () => {

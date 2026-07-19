@@ -33,25 +33,47 @@ import {
   shareText,
   type MatchTally,
 } from './results';
-import { createLoop } from './engine/loop';
-import { createInput } from './engine/input';
-import { createStore } from './engine/storage';
-import { createNet, type Net } from './engine/net';
-import { createRounds, type Rounds } from './engine/rematch';
-import { resolveName, withName } from './engine/identity';
-import { hardenViewport } from './engine/mobile';
+import { createLoop } from '@ben-gy/game-engine/loop';
+import { createInput } from '@ben-gy/game-engine/input';
+import { createStore } from '@ben-gy/game-engine/storage';
+import { createNet, roomAppId, setTurnConfig, type Net } from '@ben-gy/game-engine/net';
+import { getTurnConfig } from '@ben-gy/game-engine/turn';
+import { createRounds, type Rounds } from '@ben-gy/game-engine/rematch';
+import { resolveName, withName } from '@ben-gy/game-engine/identity';
+import { hardenViewport } from '@ben-gy/game-engine/mobile';
 import {
   createLobby,
   createRoomEntry,
   normalizeRoomCode,
   clearRoomInUrl,
   setRoomInUrl,
-} from './engine/lobby';
-import { newSeed } from './engine/rng';
+} from '@ben-gy/game-engine/lobby';
+import { newSeed } from '@ben-gy/game-engine/rng';
 
 hardenViewport();
 
-const store = createStore('delvepack');
+/** The slug every mesh on this page keys off. */
+const SLUG = 'delvepack';
+
+/**
+ * TURN credentials, fetched the instant the module evaluates.
+ *
+ * Trystero builds ONE global pool of pre-made RTCPeerConnections from whichever
+ * joinRoom fires first on the page, so a turnless first mesh leaves the
+ * initiating half of every later pair STUN-only — which is invisible in testing
+ * and fatal on carrier-grade NAT, where the data channel never opens and both
+ * players sit in the right room code staring at an empty lobby. Starting the
+ * fetch here and awaiting it in enterRoom() means the FIRST join this page ever
+ * makes already carries TURN. getTurnConfig() is session-cached and fails open
+ * to [], so this can only ever delay a join by its own 3s timeout, and only on
+ * the first room of a session.
+ */
+const turnReady: Promise<void> = getTurnConfig().then(
+  (servers) => setTurnConfig(servers),
+  () => setTurnConfig([]),
+);
+
+const store = createStore(SLUG);
 const app = document.querySelector<HTMLDivElement>('#app')!;
 
 const sfx = createSfx(store.get('muted', false));
@@ -222,19 +244,21 @@ function showRoomEntry(): void {
   shell('<div class="screen" id="entry"></div>');
   createRoomEntry({
     container: app.querySelector<HTMLElement>('#entry')!,
-    onSubmit: (code, created) => enterRoom(normalizeRoomCode(code), created),
+    onSubmit: (code, created) => void enterRoom(normalizeRoomCode(code), created),
     onCancel: showMenu,
     subtitle: `Start a room and share the code, or type a friend's. Up to ${MAX_PLAYERS} delvers.`,
   });
 }
 
-function enterRoom(code: string, created: boolean): void {
+async function enterRoom(code: string, created: boolean): Promise<void> {
+  // Nothing is torn down or mutated until TURN is in force — see `turnReady`.
+  await turnReady;
   teardownRoom();
   roomCode = code;
   setRoomInUrl(code);
 
   net = createNet(
-    { appId: 'delvepack', roomId: code, claimHost: created },
+    { appId: roomAppId(SLUG), roomId: code, claimHost: created },
     {
       onHostChange: (_id, isSelfHost) => {
         session?.setHost(isSelfHost);
@@ -766,7 +790,7 @@ const deep = url.searchParams.get('room');
 if (deep && !deepLinkUsed) {
   deepLinkUsed = true;
   const code = normalizeRoomCode(deep);
-  if (code.length >= 3) enterRoom(code, false);
+  if (code.length >= 3) void enterRoom(code, false);
   else showMenu();
 } else {
   showMenu();
