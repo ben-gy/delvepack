@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "description": "Co-op top-down dungeon crawler — descend a monster-choked dungeon, clear each floor, grab upgrades, revive each other. Solo or peer-to-peer with friends.",
+  "license": "AGPL-3.0-or-later",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
