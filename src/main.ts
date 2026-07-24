@@ -12,11 +12,6 @@
  * never touches it — rematch.ts versions rounds inside the living room.
  */
 
-// feedback:begin (managed by hub/scripts/feedback/backfill.mjs)
-import { mountFeedback } from './feedback';
-mountFeedback();
-// feedback:end
-
 import './styles/mobile.css';
 import './styles/main.css';
 
